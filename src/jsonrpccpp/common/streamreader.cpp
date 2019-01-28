@@ -1,7 +1,13 @@
 #include "streamreader.h"
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <Windows.h>
+typedef SSIZE_T ssize_t;
+#else
 #include <unistd.h>
+#endif
 
 using namespace jsonrpc;
 using namespace std;
