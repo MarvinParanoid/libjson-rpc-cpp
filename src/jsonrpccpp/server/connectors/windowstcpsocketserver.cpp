@@ -66,17 +66,31 @@ bool WindowsTcpSocketServer::StartListening() {
     }
     // Launch listening loop there
     this->running = true;
-    HANDLE ret = CreateThread(NULL, 0,
+    HANDLE ret1 = CreateThread(NULL, 0,
                               reinterpret_cast<LPTHREAD_START_ROUTINE>(
-                                  &(WindowsTcpSocketServer::LaunchLoop)),
+                                  &(WindowsTcpSocketServer::LaunchListenLoop)),
                               reinterpret_cast<LPVOID>(this), 0,
                               &(this->listenning_thread));
-    if (ret == NULL) {
+    if (ret1 == NULL) {
       ExitProcess(3);
     } else {
-      CloseHandle(ret);
+      CloseHandle(ret1);
     }
-    this->running = static_cast<bool>(ret != NULL);
+
+	// Launch handling loop there
+	HANDLE ret2 = CreateThread(NULL, 0,
+		reinterpret_cast<LPTHREAD_START_ROUTINE>(
+		&(WindowsTcpSocketServer::LaunchHandleLoop)),
+		reinterpret_cast<LPVOID>(this), 0,
+		&(this->handling_thread));
+	if (ret2 == NULL) {
+		ExitProcess(3);
+	}
+	else {
+		CloseHandle(ret2);
+	}
+
+	this->running = static_cast<bool>(ret1 != NULL) && static_cast<bool>(ret2 != NULL);
     return this->running;
   } else {
     return false;
@@ -86,6 +100,9 @@ bool WindowsTcpSocketServer::StartListening() {
 bool WindowsTcpSocketServer::StopListening() {
   if (this->running) {
     this->running = false;
+	WaitForSingleObject(
+		OpenThread(THREAD_ALL_ACCESS, FALSE, this->handling_thread),
+		INFINITE);
     WaitForSingleObject(
         OpenThread(THREAD_ALL_ACCESS, FALSE, this->listenning_thread),
         INFINITE);
@@ -117,7 +134,7 @@ bool WindowsTcpSocketServer::SendResponse(const string &response,
   return result;
 }
 
-DWORD WINAPI WindowsTcpSocketServer::LaunchLoop(LPVOID lp_data) {
+DWORD WINAPI WindowsTcpSocketServer::LaunchListenLoop(LPVOID lp_data) {
   WindowsTcpSocketServer *instance =
       reinterpret_cast<WindowsTcpSocketServer *>(lp_data);
   ;
@@ -127,6 +144,48 @@ DWORD WINAPI WindowsTcpSocketServer::LaunchLoop(LPVOID lp_data) {
             // destructors for allocated objects and therefore it would lead to
             // a memory leak.
 }
+
+DWORD WINAPI WindowsTcpSocketServer::LaunchHandleLoop(LPVOID lp_data) {
+	WindowsTcpSocketServer *instance =
+		reinterpret_cast<WindowsTcpSocketServer *>(lp_data);
+	;
+	instance->HandleLoop();
+	CloseHandle(GetCurrentThread());
+	return 0; // DO NOT USE ExitThread function here! ExitThread does not call
+	// destructors for allocated objects and therefore it would lead to
+	// a memory leak.
+}
+
+void WindowsTcpSocketServer::HandleLoop()
+{
+	while (this->running)
+	{
+		queue_mutex.lock();
+		if (!request_queue.empty())
+		{
+			auto message = request_queue.front();
+			
+			auto &connection_fd = message.params->connection_fd;
+			auto &instance = message.params->instance;
+			auto &request = message.request;
+			std::string response;
+			
+			instance->ProcessRequest(request, response);
+			instance->SendResponse(response, reinterpret_cast<void *>(connection_fd));
+
+			delete message.params;
+
+			request_queue.pop();
+			queue_mutex.unlock();
+		}
+		else
+		{
+			queue_mutex.unlock();
+			Sleep(loop_delay);
+		}
+	}
+}
+
 
 void WindowsTcpSocketServer::ListenLoop() {
   while (this->running) {
@@ -140,24 +199,31 @@ void WindowsTcpSocketServer::ListenLoop() {
       unsigned long nonBlocking = 0;
       ioctlsocket(connection_fd, FIONBIO, &nonBlocking); // Set blocking
       DWORD client_thread;
-      struct GenerateResponseParameters *params =
-          new struct GenerateResponseParameters();
+      struct GenerateResponseParameters *params = new struct GenerateResponseParameters();
+
       params->instance = this;
       params->connection_fd = connection_fd;
-      HANDLE ret =
-          CreateThread(NULL, 0,
-                       reinterpret_cast<LPTHREAD_START_ROUTINE>(
-                           &(WindowsTcpSocketServer::GenerateResponse)),
-                       reinterpret_cast<LPVOID>(params), 0, &client_thread);
-      if (ret == NULL) {
-        delete params;
-        params = NULL;
-        CleanClose(connection_fd);
-      } else {
-        CloseHandle(ret);
-      }
+
+	  int nbytes = 0;
+	  char buffer[BUFFER_SIZE];
+	  memset(&buffer, 0, BUFFER_SIZE);
+	  string request;
+	  do { // The client sends its json formatted request and a delimiter request.
+		  nbytes = recv(connection_fd, buffer, BUFFER_SIZE, 0);
+		  if (nbytes == -1) {
+			  this->CleanClose(connection_fd);
+		  }
+		  else {
+			  request.append(buffer, nbytes);
+		  }
+	  } while (request.find(DELIMITER_CHAR) == string::npos);
+
+	  queue_mutex.lock();
+	  request_queue.push(RequestMessage{ params, request });
+	  queue_mutex.unlock();
+
     } else {
-      Sleep(2.5);
+      Sleep(loop_delay);
     }
   }
 }
@@ -184,6 +250,7 @@ DWORD WINAPI WindowsTcpSocketServer::GenerateResponse(LPVOID lp_data) {
   std::string response;
   instance->ProcessRequest(request, response);
   instance->SendResponse(response, reinterpret_cast<void *>(connection_fd));
+  return 0;
   CloseHandle(GetCurrentThread());
   return 0; // DO NOT USE ExitThread function here! ExitThread does not call
             // destructors for allocated objects and therefore it would lead to

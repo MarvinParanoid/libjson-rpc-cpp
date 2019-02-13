@@ -14,6 +14,9 @@
 #include <stdint.h>
 #include <winsock2.h>
 
+#include <mutex>
+#include <queue>
+
 #include "../abstractserverconnector.h"
 
 namespace jsonrpc
@@ -71,6 +74,8 @@ namespace jsonrpc
             bool SendResponse(const std::string& response, void* addInfo = NULL);
 
         private:
+			const DWORD loop_delay = 10;/*!< A loop delay (for listening and handling threads ) in milliseconds*/
+
             bool running;               /*!< A boolean that is used to know the listening state*/
             std::string ipToBind;       /*!< The ipv4 address on which the server should bind and listen*/
             unsigned int port;          /*!< The port on which the server should bind and listen*/
@@ -78,12 +83,13 @@ namespace jsonrpc
             SOCKADDR_IN address;        /*!< The listening socket*/
 
             DWORD listenning_thread;    /*!< The identifier of the listen loop thread*/
+			DWORD handling_thread;		/*!< The identifier of the handle loop thread*/
 
                         /**
                          * @brief The static method that is used as listening thread entry point
                          * @param lp_data The parameters for the thread entry point method
                          */
-            static DWORD WINAPI LaunchLoop(LPVOID lp_data);
+            static DWORD WINAPI LaunchListenLoop(LPVOID lp_data);
                         /**
                          * @brief The method that launches the listenning loop
                          */
@@ -135,6 +141,26 @@ namespace jsonrpc
                          * @returns The return value of POSIX close() method
                          */
             int CleanClose(const SOCKET& fd);
+
+						/**
+						* @brief The static method that is used as handling thread entry point
+						* @param lp_data The parameters for the thread entry point method
+						*/
+			static DWORD WINAPI LaunchHandleLoop(LPVOID lp_data);
+
+						/**
+						* @brief The method that launches the handling loop
+						*/
+			void HandleLoop();
+
+			struct RequestMessage
+			{
+				GenerateResponseParameters *params;
+				std::string request;
+			};
+			std::queue<RequestMessage> request_queue;	/*!< The queue for storage received messages*/
+			std::mutex queue_mutex;
+
     };
 
 } /* namespace jsonrpc */
